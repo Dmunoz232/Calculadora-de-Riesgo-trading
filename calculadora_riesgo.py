@@ -1,6 +1,8 @@
 import tkinter as tk
 from tkinter import ttk
 import math
+import requests
+import threading
 
 # ── Paleta de colores ──────────────────────────────────────────────────────────
 BG        = "#1a1a18"
@@ -18,26 +20,27 @@ ENTRY_BG  = "#1e1e1c"
 ENTRY_FG  = "#f0ede6"
 ACCENT    = "#7F77DD"
 
-# ── NUEVO ESTILO DE LETRA (Helvetica sans-serif) ──────────────────────────────
+# ── Fuentes ───────────────────────────────────────────────────────────────────
 FONT_BODY  = ("Helvetica", 11)
 FONT_SMALL = ("Helvetica", 10)
 FONT_LARGE = ("Helvetica", 16, "bold")
 FONT_MED   = ("Helvetica", 13, "bold")
 FONT_LABEL = ("Helvetica", 10)
 
-# ── Ventana principal ──────────────────────────────────────────────────────────
+# ── Ventana principal ─────────────────────────────────────────────────────────
 root = tk.Tk()
 root.title("Calculadora de Riesgo · Trading")
 root.configure(bg=BG)
 root.resizable(True, True)
-root.minsize(640, 700)
+root.minsize(680, 780)
 
-# Variables reactivas
+# ── Variables reactivas ───────────────────────────────────────────────────────
 v_entry     = tk.DoubleVar(value=100.0)
 v_direction = tk.StringVar(value="long")
 v_tp        = tk.DoubleVar(value=5.0)
 v_sl        = tk.DoubleVar(value=2.0)
 v_capital   = tk.DoubleVar(value=0.0)
+v_cripto    = tk.StringVar(value="bitcoin")
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 def fmt(n):
@@ -76,7 +79,6 @@ def draw_bar(canvas, entry, tp_price, sl_price, direction):
     ent_x = to_x(entry)
     mid   = H // 2
 
-    # Zona TP
     tp_color  = GREEN if direction == "long" else RED
     sl_color  = RED   if direction == "long" else GREEN
     tp_dim    = GREEN_DIM if direction == "long" else RED_DIM
@@ -90,7 +92,6 @@ def draw_bar(canvas, entry, tp_price, sl_price, direction):
     x1_sl = max(ent_x, sl_x)
     canvas.create_rectangle(x0_sl, mid-14, x1_sl, mid+14, fill=sl_dim, outline="")
 
-    # Líneas verticales
     for x, price, color, label in [
         (sl_x,  sl_price,  sl_color,   "SL"),
         (ent_x, entry,     TEXT_SEC,   "Entrada"),
@@ -107,7 +108,10 @@ def calcular(*_):
         entry   = v_entry.get()
         tp_pct  = v_tp.get()
         sl_pct  = v_sl.get()
-        capital = v_capital.get()
+        try:
+            capital = v_capital.get()
+        except tk.TclError:
+            capital = 0.0
         direc   = v_direction.get()
     except tk.TclError:
         return
@@ -135,27 +139,60 @@ def calcular(*_):
     q_text, q_color = quality_label(ratio)
     lbl_quality_val.config(text=q_text, fg=q_color)
 
-    # Capital
-    if capital > 0:
-        units    = capital / entry if entry > 0 else 0
-        gain     = units * abs(tp_diff)
-        loss     = units * abs(sl_diff)
-        lbl_gain_val.config(text=fmt_signed(gain))
-        lbl_loss_val.config(text=f"-{fmt(loss)}")
-        frame_capital.grid()
+    # Cálculo de ganancia/pérdida en USD y unidades
+    if entry > 0:
+        if capital > 0:
+            units = capital / entry
+            gain = units * abs(tp_diff)
+            loss = units * abs(sl_diff)
+            lbl_gain_destacado.config(text=fmt_signed(gain), fg=GREEN)
+            lbl_loss_destacado.config(text=f"-{fmt(loss)}", fg=RED)
+            lbl_units_val.config(text=f"{units:.8f} {v_cripto.get().capitalize()}")
+        else:
+            # capital es 0 o vacío: mostrar ceros
+            lbl_gain_destacado.config(text="+$0.00", fg=GREEN)
+            lbl_loss_destacado.config(text="-$0.00", fg=RED)
+            lbl_units_val.config(text=f"0.00000000 {v_cripto.get().capitalize()}")
+        # Mostrar el frame de resultados si aún no está visible
+        try:
+            frame_resultados.pack(fill="x", pady=(0, 14))
+        except tk.TclError:
+            pass  # ya está empacado
     else:
-        frame_capital.grid_remove()
+        # Ocultar resultados si el precio de entrada es inválido
+        frame_resultados.pack_forget()
 
     # Barra visual
     root.after(10, lambda: draw_bar(bar_canvas, entry, tp_price, sl_price, direc))
 
 def sync_tp_slider(val):
-    v_tp.set(round(float(val), 1))
+    # Limitar el valor máximo a 10
+    new_val = min(10.0, max(0.1, float(val)))
+    v_tp.set(round(new_val, 1))
     calcular()
 
 def sync_sl_slider(val):
-    v_sl.set(round(float(val), 1))
+    # Limitar el valor máximo a 10
+    new_val = min(10.0, max(0.1, float(val)))
+    v_sl.set(round(new_val, 1))
     calcular()
+
+# ── OBTENER PRECIO EN TIEMPO REAL (CoinGecko) ─────────────────────────────────
+def fetch_price_thread():
+    def task():
+        try:
+            coin_id = v_cripto.get().strip().lower()
+            url = f"https://api.coingecko.com/api/v3/simple/price?ids={coin_id}&vs_currencies=usd"
+            response = requests.get(url, timeout=8)
+            data = response.json()
+            if coin_id not in data:
+                raise ValueError("Moneda no encontrada")
+            price = data[coin_id]["usd"]
+            root.after(0, lambda: v_entry.set(price))
+            root.after(0, lambda: lbl_status.config(text=f"✓ Precio actual: ${price:,.2f}", fg=GREEN))
+        except Exception as e:
+            root.after(0, lambda: lbl_status.config(text=f"✗ Error: {e}", fg=RED))
+    threading.Thread(target=task, daemon=True).start()
 
 # ── Construcción de la UI ─────────────────────────────────────────────────────
 outer = tk.Frame(root, bg=BG)
@@ -171,9 +208,27 @@ def styled_entry(parent, textvariable, width=14):
                  highlightbackground=BORDER, highlightcolor=ACCENT)
     return e
 
-def card(parent, **kwargs):
-    return tk.Frame(parent, bg=CARD, relief="flat",
-                    highlightthickness=1, highlightbackground=BORDER, **kwargs)
+# ── Fila 0: Selector de cripto + botón precio real ────────────────────────────
+row0 = tk.Frame(outer, bg=BG)
+row0.pack(fill="x", pady=(0, 14))
+
+col_selector = tk.Frame(row0, bg=BG)
+col_selector.pack(side="left", fill="x", expand=True, padx=(0, 12))
+section_label(col_selector, "Criptomoneda")
+cripto_combo = ttk.Combobox(col_selector, textvariable=v_cripto,
+                            values=["bitcoin", "ethereum", "solana", "cardano", "dogecoin", "ripple"],
+                            state="readonly", font=FONT_BODY)
+cripto_combo.pack(fill="x", ipady=4)
+cripto_combo.bind("<<ComboboxSelected>>", lambda e: fetch_price_thread())
+
+col_btn = tk.Frame(row0, bg=BG)
+col_btn.pack(side="left", fill="x", expand=True)
+section_label(col_btn, "Precio actual")
+btn_fetch = tk.Button(col_btn, text="Obtener precio en tiempo real", command=fetch_price_thread,
+                      bg=ACCENT, fg=TEXT, font=FONT_BODY, cursor="hand2", relief="flat", padx=12, pady=4)
+btn_fetch.pack(fill="x")
+lbl_status = tk.Label(col_btn, text="", bg=BG, fg=GREEN, font=FONT_SMALL)
+lbl_status.pack(pady=(4,0))
 
 # ── Fila 1: Precio + Dirección ────────────────────────────────────────────────
 row1 = tk.Frame(outer, bg=BG)
@@ -216,7 +271,7 @@ btn_short.pack(side="left", fill="x", expand=True)
 dir_buttons = [(btn_long, "long"), (btn_short, "short")]
 btn_long.config(bg=ACCENT, fg=TEXT)
 
-# ── Fila 2: TP + SL sliders ───────────────────────────────────────────────────
+# ── Fila 2: TP + SL sliders (rango máximo 10%) ────────────────────────────────
 row2 = tk.Frame(outer, bg=BG)
 row2.pack(fill="x", pady=(0, 14))
 
@@ -224,14 +279,11 @@ def slider_block(parent, label, var, from_, to, sync_fn):
     col = tk.Frame(parent, bg=BG)
     col.pack(side="left", fill="x", expand=True, padx=(0, 12))
     section_label(col, label)
-
     inner = tk.Frame(col, bg=BG)
     inner.pack(fill="x")
-
     slider = ttk.Scale(inner, from_=from_, to=to, variable=var, orient="horizontal",
                        command=sync_fn)
     slider.pack(side="left", fill="x", expand=True, padx=(0, 8))
-
     pct_frame = tk.Frame(inner, bg=ENTRY_BG, highlightthickness=1,
                          highlightbackground=BORDER)
     pct_frame.pack(side="left")
@@ -243,13 +295,14 @@ def slider_block(parent, label, var, from_, to, sync_fn):
              padx=6).pack(side="left")
     return col
 
-slider_block(row2, "Take profit (%)", v_tp, 0.1, 100, sync_tp_slider)
-slider_block(row2, "Stop loss (%)",   v_sl, 0.1, 50,  sync_sl_slider)
+# Cambiamos el rango máximo a 10 para ambos sliders
+slider_block(row2, "Take profit (%)", v_tp, 0.1, 10.0, sync_tp_slider)
+slider_block(row2, "Stop loss (%)",   v_sl, 0.1, 10.0, sync_sl_slider)
 
-# ── Capital ───────────────────────────────────────────────────────────────────
+# ── Fila 3: Capital invertido ─────────────────────────────────────────────────
 row3 = tk.Frame(outer, bg=BG)
 row3.pack(fill="x", pady=(0, 14))
-section_label(row3, "Capital invertido")
+section_label(row3, "Capital invertido (USD)")
 cap_input = tk.Frame(row3, bg=ENTRY_BG, highlightthickness=1,
                      highlightbackground=BORDER)
 cap_input.pack(side="left")
@@ -260,7 +313,7 @@ ce.pack(side="left", ipady=4)
 ce.bind("<Return>", calcular)
 ce.bind("<FocusOut>", calcular)
 
-# ── Cards de precio ───────────────────────────────────────────────────────────
+# ── Fila 4: Cards de precio ───────────────────────────────────────────────────
 row4 = tk.Frame(outer, bg=BG)
 row4.pack(fill="x", pady=(0, 14))
 
@@ -277,14 +330,10 @@ def price_card(parent, title, title_color, bg_color, border_color):
     return val_lbl, diff_lbl
 
 lbl_entry_val, _ = price_card(row4, "Entrada",     TEXT,  CARD,      BORDER)
-_ = _  # no diff for entry
 lbl_tp_val,   lbl_tp_diff = price_card(row4, "Take profit", GREEN, GREEN_DIM, GREEN)
 lbl_sl_val,   lbl_sl_diff = price_card(row4, "Stop loss",   RED,   RED_DIM,   RED)
 
-# sin diff en entrada — sobreescribimos para silenciar
-_ = lbl_entry_val.master.winfo_children()
-
-# ── Barra de stats ────────────────────────────────────────────────────────────
+# ── Fila 5: Estadísticas (Ratio + Calidad) ────────────────────────────────────
 row5 = tk.Frame(outer, bg=SURFACE, highlightthickness=1,
                 highlightbackground=BORDER, padx=16, pady=12)
 row5.pack(fill="x", pady=(0, 14))
@@ -300,26 +349,41 @@ def stat_cell(parent, label, side="left"):
 lbl_ratio_val   = stat_cell(row5, "Ratio riesgo/beneficio")
 lbl_quality_val = stat_cell(row5, "Calidad del setup")
 
-frame_capital = tk.Frame(row5, bg=SURFACE)
-frame_capital.pack(side="left", fill="x", expand=True)
-lbl_gain_val = tk.Label(frame_capital, text="—", bg=SURFACE, fg=GREEN, font=FONT_MED)
-lbl_loss_val = tk.Label(frame_capital, text="—", bg=SURFACE, fg=RED,   font=FONT_MED)
-tk.Label(frame_capital, text="Ganancia potencial", bg=SURFACE, fg=TEXT_SEC, font=FONT_SMALL).pack()
-lbl_gain_val.pack()
-tk.Label(frame_capital, text="Pérdida máxima",    bg=SURFACE, fg=TEXT_SEC, font=FONT_SMALL).pack(pady=(4,0))
-lbl_loss_val.pack()
-frame_capital.grid_remove()  # oculto hasta que haya capital
+# ── Fila 6: RESULTADOS DESTACADOS (Ganancia / Pérdida) ────────────────────────
+frame_resultados = tk.Frame(outer, bg=SURFACE, highlightthickness=1, highlightbackground=BORDER, padx=16, pady=12)
+# NO empaquetar aquí, se hará dinámicamente en calcular()
+
+row_result = tk.Frame(frame_resultados, bg=SURFACE)
+row_result.pack(fill="x", expand=True)
+
+col_gain = tk.Frame(row_result, bg=SURFACE)
+col_gain.pack(side="left", fill="x", expand=True, padx=(0, 8))
+tk.Label(col_gain, text=" GANANCIA SI TP ALCANZADO", bg=SURFACE, fg=GREEN, font=FONT_MED).pack()
+lbl_gain_destacado = tk.Label(col_gain, text="+$0.00", bg=SURFACE, fg=GREEN, font=("Helvetica", 20, "bold"))
+lbl_gain_destacado.pack(pady=5)
+
+col_loss = tk.Frame(row_result, bg=SURFACE)
+col_loss.pack(side="left", fill="x", expand=True)
+tk.Label(col_loss, text=" PÉRDIDA SI SL ALCANZADO", bg=SURFACE, fg=RED, font=FONT_MED).pack()
+lbl_loss_destacado = tk.Label(col_loss, text="-$0.00", bg=SURFACE, fg=RED, font=("Helvetica", 20, "bold"))
+lbl_loss_destacado.pack(pady=5)
+
+tk.Frame(frame_resultados, height=2, bg=BORDER).pack(fill="x", pady=8)
+units_frame = tk.Frame(frame_resultados, bg=SURFACE)
+units_frame.pack(fill="x")
+tk.Label(units_frame, text="Unidades a comprar:", bg=SURFACE, fg=TEXT_SEC, font=FONT_BODY).pack(side="left")
+lbl_units_val = tk.Label(units_frame, text="—", bg=SURFACE, fg=ACCENT, font=FONT_BODY)
+lbl_units_val.pack(side="left", padx=(5,0))
 
 # ── Barra visual ──────────────────────────────────────────────────────────────
 tk.Label(outer, text="Visualización de niveles", bg=BG, fg=TEXT_SEC,
          font=FONT_LABEL).pack(anchor="w", pady=(0, 4))
-
 bar_canvas = tk.Canvas(outer, height=80, bg=SURFACE,
                        highlightthickness=1, highlightbackground=BORDER)
 bar_canvas.pack(fill="x", pady=(0, 4))
 bar_canvas.bind("<Configure>", calcular)
 
-# ── Estilos ttk ──────────────────────────────────────────────────────────────
+# ── Estilos ttk ───────────────────────────────────────────────────────────────
 style = ttk.Style()
 style.theme_use("clam")
 style.configure("Horizontal.TScale",
@@ -327,8 +391,10 @@ style.configure("Horizontal.TScale",
                 troughcolor=BORDER,
                 sliderthickness=16,
                 sliderrelief="flat")
+style.configure("TCombobox", fieldbackground=ENTRY_BG, background=ENTRY_BG,
+                foreground=TEXT, arrowcolor=TEXT)
 
-# ── Bind cambios globales ──────────────────────────────────────────────────────
+# ── Bind cambios globales ─────────────────────────────────────────────────────
 v_entry.trace_add("write", calcular)
 v_capital.trace_add("write", calcular)
 
@@ -337,7 +403,7 @@ header = tk.Frame(root, bg=BG)
 header.pack(before=outer, fill="x", padx=24, pady=(20, 0))
 tk.Label(header, text="CALCULADORA DE RIESGO",
          bg=BG, fg=TEXT, font=("Helvetica", 14, "bold")).pack(side="left")
-tk.Label(header, text="· trading",
+tk.Label(header, text="· trading con precios reales",
          bg=BG, fg=ACCENT, font=("Helvetica", 14)).pack(side="left", padx=(4, 0))
 
 calcular()
